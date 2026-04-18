@@ -6,9 +6,9 @@ services:
       - "11111:5000"
     
     # --- 在这里设置你的自定义账号密码 ---
-    environment:
-      - CONVERTER_USER=mickey
-      - CONVERTER_PASS=1
+    # environment:
+      # - CONVERTER_USER=mickey
+      # - CONVERTER_PASS=1
       
     volumes:
       - ./:/app
