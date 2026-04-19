@@ -31,6 +31,7 @@ import (
 // --- 常量与核心配置 ---
 const MAX_LINKS = 100
 const PING_TIMEOUT_MS = 3000
+const LINK_EXPIRY_DAYS = 7 // 设定过期天数为 7 天
 
 var (
 	MIHOMO_DIR string
@@ -39,9 +40,10 @@ var (
 
 // --- 短链系统存储 ---
 type ShortLink struct {
-	Data       string `json:"data"`
-	FilterMode bool   `json:"filter"`
-	FullConfig bool   `json:"full"`
+	Data           string    `json:"data"`
+	FilterMode     bool      `json:"filter"`
+	FullConfig     bool      `json:"full"`
+	LastAccessedAt time.Time `json:"last_accessed_at"` // 最后访问时间，用于清理判断
 }
 
 var (
@@ -58,6 +60,10 @@ func init() {
 		MIHOMO_BIN += ".exe"
 	}
 	shortLinksFile = filepath.Join(MIHOMO_DIR, "shortlinks.json")
+
+	// 启动时清理上次可能意外残留的 cache.db
+	os.Remove(filepath.Join(MIHOMO_DIR, "cache.db"))
+
 	loadShortLinks()
 }
 
@@ -70,8 +76,38 @@ func loadShortLinks() {
 }
 
 func saveShortLinks() {
+	// 使用 Indent 让 JSON 文件更具可读性
 	b, _ := json.MarshalIndent(shortLinks, "", "  ")
 	os.WriteFile(shortLinksFile, b, 0644)
+}
+
+// 自动清理过期链接的任务
+func startCleanupTask() {
+	ticker := time.NewTicker(1 * time.Hour) // 每小时检查一次
+	go func() {
+		for range ticker.C {
+			cleanupExpiredLinks()
+		}
+	}()
+}
+
+func cleanupExpiredLinks() {
+	shortLinkMu.Lock()
+	defer shortLinkMu.Unlock()
+
+	now := time.Now()
+	count := 0
+	for id, link := range shortLinks {
+		// 如果最后访问时间距离现在超过 7 天，则删除
+		if now.Sub(link.LastAccessedAt) > time.Duration(LINK_EXPIRY_DAYS)*24*time.Hour {
+			delete(shortLinks, id)
+			count++
+		}
+	}
+	if count > 0 {
+		saveShortLinks()
+		fmt.Printf("[%s] 清理任务：删除了 %d 条过期短链\n", now.Format("2006-01-02 15:04:05"), count)
+	}
 }
 
 func getOrCreateShortLink(data string, filter, full bool) string {
@@ -81,7 +117,12 @@ func getOrCreateShortLink(data string, filter, full bool) string {
 	shortLinkMu.Lock()
 	defer shortLinkMu.Unlock()
 	if _, exists := shortLinks[id]; !exists {
-		shortLinks[id] = ShortLink{Data: data, FilterMode: filter, FullConfig: full}
+		shortLinks[id] = ShortLink{
+			Data:           data,
+			FilterMode:     filter,
+			FullConfig:     full,
+			LastAccessedAt: time.Now(), // 初始化访问时间
+		}
 		saveShortLinks()
 	}
 	return id
@@ -131,368 +172,52 @@ const HTML_TEMPLATE = `
     <title>订阅转换器</title>
     <style>
         :root {
-            --primary: #3b82f6;
-            --primary-hover: #2563eb;
-            --success: #10b981;
-            --success-bg: #ecfdf5;
-            --success-border: #a7f3d0;
-            --success-text: #047857;
-            --warning: #f59e0b;
-            --warning-bg: #fffbeb;
-            --warning-border: #fde68a;
-            --warning-text: #b45309;
-            --danger: #ef4444;
-            --danger-bg: #fee2e2;
-            --danger-border: #fecaca;
-            --danger-text: #b91c1c;
-            --bg: #f4f4f5;
-            --text: #3f3f46;
-            --text-muted: #71717a;
-            --card-bg: #ffffff;
-            --border: #e4e4e7;
-            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            --primary: #3b82f6; --primary-hover: #2563eb; --success: #10b981;
+            --success-bg: #ecfdf5; --success-border: #a7f3d0; --success-text: #047857;
+            --warning: #f59e0b; --warning-bg: #fffbeb; --warning-border: #fde68a; --warning-text: #b45309;
+            --danger: #ef4444; --danger-bg: #fee2e2; --danger-border: #fecaca; --danger-text: #b91c1c;
+            --bg: #f4f4f5; --text: #3f3f46; --text-muted: #71717a; --card-bg: #ffffff;
+            --border: #e4e4e7; --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-            background: var(--bg);
-            padding: 20px 15px;
-            color: var(--text);
-            line-height: 1.6;
-        }
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-            background: var(--card-bg);
-            padding: 28px;
-            border-radius: 16px;
-            box-shadow: var(--shadow);
-        }
-        .header {
-            margin-bottom: 24px;
-            text-align: center;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border);
-        }
-        .header h2 {
-            margin: 0;
-            color: #18181b;
-            font-size: 1.6rem;
-            font-weight: 700;
-        }
-        .header p {
-            margin-top: 6px;
-            color: var(--text-muted);
-            font-size: 0.9rem;
-        }
-        
-        label {
-            display: block;
-            margin-bottom: 10px;
-            font-weight: 600;
-            font-size: 0.95rem;
-            color: #52525b;
-        }
-        
-        textarea {
-            width: 100%;
-            height: 180px;
-            padding: 12px 14px;
-            border: 2px solid var(--border);
-            border-radius: 10px;
-            font-family: ui-monospace, SFMono-Regular, monospace;
-            resize: vertical;
-            font-size: 13px;
-            outline: none;
-            line-height: 1.5;
-            transition: border-color 0.2s, box-shadow 0.2s;
-            background: #fafafa;
-        }
-        textarea:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-            background: #fff;
-        }
-        
-        .options-bar {
-            background: #f8fafc;
-            padding: 14px 16px;
-            border-radius: 10px;
-            margin: 16px 0;
-            border: 1px solid var(--border);
-            display: flex;
-            flex-wrap: wrap;
-            gap: 16px;
-            align-items: center;
-        }
-        .options-bar label {
-            margin: 0;
-            font-weight: 500;
-            font-size: 0.9rem;
-            color: #475569;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            cursor: pointer;
-            user-select: none;
-        }
-        .options-bar input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
-            accent-color: var(--primary);
-            cursor: pointer;
-        }
-        
-        .btn-group {
-            display: flex;
-            gap: 12px;
-            margin: 20px 0;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        button {
-            color: white;
-            border: none;
-            padding: 12px 28px;
-            border-radius: 10px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
-            transition: all 0.2s ease;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
-            min-width: 140px;
-        }
-        button:hover:not(:disabled) {
-            filter: brightness(1.05);
-            transform: translateY(-1px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.12);
-        }
-        button:active:not(:disabled) {
-            transform: translateY(0);
-        }
-        button:disabled {
-            opacity: 0.8;
-            cursor: not-allowed;
-        }
-        .btn-all { background: var(--primary); }
-        .btn-all:hover:not(:disabled) { background: var(--primary-hover); }
-        
-        .footer {
-            margin-top: 32px;
-            font-size: 12px;
-            color: #a1a1aa;
-            text-align: center;
-            padding-top: 20px;
-            border-top: 1px solid var(--border);
-        }
-        
-        /* 消息提示框 */
-        .alert {
-            padding: 14px 16px;
-            border-radius: 10px;
-            margin-bottom: 16px;
-            font-size: 14px;
-            background: var(--danger-bg);
-            color: var(--danger-text);
-            border: 1px solid var(--danger-border);
-            display: {{ if .Error }}block{{ else }}none{{ end }};
-        }
-        .error-list {
-            background: var(--warning-bg);
-            color: var(--warning-text);
-            padding: 14px 16px;
-            border-radius: 10px;
-            margin-bottom: 16px;
-            border: 1px solid var(--warning-border);
-            font-size: 13px;
-            max-height: 160px;
-            overflow-y: auto;
-        }
-        .error-list ul { margin: 6px 0 0 0; padding-left: 20px; }
-        .error-list li { margin: 4px 0; }
-        
-        .stats-box {
-            background: var(--success-bg);
-            color: var(--success-text);
-            padding: 14px 16px;
-            border-radius: 10px;
-            margin-bottom: 16px;
-            border: 1px solid var(--success-border);
-            font-size: 14px;
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        /* 订阅链接框 */
-        .sub-box {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            margin: 16px 0;
-            align-items: center;
-            background: #f8fafc;
-            padding: 12px;
-            border: 1px solid var(--border);
-            border-radius: 10px;
-        }
-        .sub-input {
-            flex: 1;
-            min-width: 200px;
-            padding: 10px 12px;
-            border: 1px solid #cbd5e1;
-            border-radius: 6px;
-            font-family: ui-monospace, monospace;
-            font-size: 13px;
-            outline: none;
-            background: #fff;
-            color: #334155;
-        }
-        .sub-input:focus { border-color: var(--primary); }
-        
-        /* 节点检测详情模块 */
-        .filter-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            margin: 20px 0;
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        }
-        .filter-card summary {
-            padding: 14px 18px;
-            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-            border-bottom: 1px solid var(--border);
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 0.95rem;
-            color: #334155;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            list-style: none;
-            transition: background 0.2s;
-        }
-        .filter-card summary:hover {
-            background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
-        }
-        .filter-card summary::-webkit-details-marker { display: none; }
-        .filter-card summary::before {
-            content: "▶";
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            display: inline-block;
-        }
-        .filter-card details[open] > summary::before {
-            transform: rotate(90deg);
-        }
-        
-        .filter-stats-inline {
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            margin-left: auto;
-            font-size: 0.85rem;
-            font-weight: 500;
-        }
-        .stat-badge {
-            padding: 3px 10px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-        }
+        body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); padding: 20px 15px; color: var(--text); line-height: 1.6; }
+        .container { max-width: 900px; margin: 0 auto; background: var(--card-bg); padding: 28px; border-radius: 16px; box-shadow: var(--shadow); }
+        .header { margin-bottom: 24px; text-align: center; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+        .header h2 { margin: 0; color: #18181b; font-size: 1.6rem; font-weight: 700; }
+        .header p { margin-top: 6px; color: var(--text-muted); font-size: 0.9rem; }
+        label { display: block; margin-bottom: 10px; font-weight: 600; font-size: 0.95rem; color: #52525b; }
+        textarea { width: 100%; height: 180px; padding: 12px 14px; border: 2px solid var(--border); border-radius: 10px; font-family: monospace; resize: vertical; font-size: 13px; outline: none; background: #fafafa; }
+        textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15); background: #fff; }
+        .options-bar { background: #f8fafc; padding: 14px 16px; border-radius: 10px; margin: 16px 0; border: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+        .options-bar label { margin: 0; font-weight: 500; font-size: 0.9rem; color: #475569; display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+        .btn-group { display: flex; gap: 12px; margin: 20px 0; justify-content: center; flex-wrap: wrap; }
+        button { color: white; border: none; padding: 12px 28px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; min-width: 140px; background: var(--primary); }
+        button:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.12); }
+        button:disabled { opacity: 0.8; cursor: not-allowed; }
+        .footer { margin-top: 32px; font-size: 12px; color: #a1a1aa; text-align: center; padding-top: 20px; border-top: 1px solid var(--border); }
+        .alert { padding: 14px 16px; border-radius: 10px; margin-bottom: 16px; font-size: 14px; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); display: {{ if .Error }}block{{ else }}none{{ end }}; }
+        .error-list { background: var(--warning-bg); color: var(--warning-text); padding: 14px 16px; border-radius: 10px; margin-bottom: 16px; border: 1px solid var(--warning-border); font-size: 13px; max-height: 160px; overflow-y: auto; }
+        .stats-box { background: var(--success-bg); color: var(--success-text); padding: 14px 16px; border-radius: 10px; margin-bottom: 16px; border: 1px solid var(--success-border); font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+        .sub-box { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; align-items: center; background: #f8fafc; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+        .sub-input { flex: 1; min-width: 200px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+        .filter-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; margin: 20px 0; overflow: hidden; }
+        .filter-card summary { padding: 14px 18px; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-bottom: 1px solid var(--border); cursor: pointer; font-weight: 600; color: #334155; display: flex; align-items: center; gap: 10px; list-style: none; }
+        .filter-stats-inline { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; font-size: 0.85rem; font-weight: 500; }
+        .stat-badge { padding: 3px 10px; border-radius: 20px; font-size: 0.8rem; }
         .stat-badge.pass { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
         .stat-badge.fail { background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); }
-        
-        .filter-log {
-            padding: 12px 18px 18px;
-            background: #fafafa;
-            max-height: 280px;
-            overflow-y: auto;
-            font-family: ui-monospace, SFMono-Regular, monospace;
-            font-size: 12px;
-            line-height: 1.7;
-        }
-        .filter-log::-webkit-scrollbar { width: 6px; }
-        .filter-log::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 3px; }
-        .filter-log::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-        
-        .log-item {
-            padding: 6px 0;
-            border-bottom: 1px dashed #e2e8f0;
-            display: flex;
-            align-items: flex-start;
-            gap: 8px;
-            animation: fadeIn 0.2s ease;
-        }
-        .log-item:last-child { border-bottom: none; }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(4px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .log-icon { flex-shrink: 0; width: 18px; text-align: center; font-weight: bold; }
-        .log-pass .log-icon { color: var(--success); }
-        .log-fail .log-icon { color: var(--danger); }
-        .log-info .log-icon { color: var(--text-muted); }
-        .log-pass { color: #065f46; }
-        .log-fail { color: #991b1b; }
-        .log-info { color: var(--text-muted); }
-        
-        /* 结果预览区域 */
-        .result-card {
-            margin-top: 20px;
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            overflow: hidden;
-        }
-        .result-card label {
-            display: block;
-            padding: 12px 16px;
-            background: #f8fafc;
-            border-bottom: 1px solid var(--border);
-            font-weight: 600;
-            font-size: 0.9rem;
-            color: #334155;
-        }
-        .result-card textarea {
-            border: none;
-            border-radius: 0;
-            height: 220px;
-            background: #fff;
-        }
-        
-        /* 转换按钮加载动画 */
-        .spinner {
-            display: inline-block;
-            width: 14px;
-            height: 14px;
-            border: 2px solid rgba(255,255,255,0.3);
-            border-radius: 50%;
-            border-top-color: #fff;
-            animation: spin 0.75s linear infinite;
-            margin-right: 6px;
-            vertical-align: middle;
-        }
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        @media (max-width: 600px) {
-            .container { padding: 20px 16px; }
-            .header h2 { font-size: 1.4rem; }
-            button { min-width: 120px; padding: 10px 20px; font-size: 13px; }
-            .options-bar { flex-direction: column; align-items: flex-start; gap: 10px; }
-            .filter-stats-inline { margin-left: 0; margin-top: 6px; flex-wrap: wrap; }
-            .sub-box { flex-direction: column; align-items: stretch; }
-        }
+        .filter-log { padding: 12px 18px 18px; background: #fafafa; max-height: 280px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+        .log-item { padding: 6px 0; border-bottom: 1px dashed #e2e8f0; display: flex; align-items: flex-start; gap: 8px; }
+        .result-card { margin-top: 20px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+        .result-card label { padding: 12px 16px; background: #f8fafc; border-bottom: 1px solid var(--border); font-weight: 600; }
+        .result-card textarea { border: none; border-radius: 0; height: 220px; background: #fff; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h2>订阅转换器</h2>
-            <p>支持多配置混合/多协议直链/订阅链接 · 节点连通性检测</p>
+            <p>支持多配置混合 / 连通性检测 / 自动过期清理 (7天未用)</p>
         </div>
         
         <div class="alert">{{ .Error }}</div>
@@ -519,7 +244,7 @@ const HTML_TEMPLATE = `
 
         {{ if .FilterResults }}
         <div class="filter-card">
-            <details>
+            <details open>
                 <summary>
                     <span>📋 节点检测详情</span>
                     <div class="filter-stats-inline">
@@ -529,22 +254,9 @@ const HTML_TEMPLATE = `
                 </summary>
                 <div class="filter-log">
                     {{ range .FilterResults }}
-                        {{ if contains . "✅" }}
-                            <div class="log-item log-pass">
-                                <span class="log-icon">✓</span>
-                                <span class="log-text">{{ . }}</span>
-                            </div>
-                        {{ else if contains . "❌" }}
-                            <div class="log-item log-fail">
-                                <span class="log-icon">✗</span>
-                                <span class="log-text">{{ . }}</span>
-                            </div>
-                        {{ else }}
-                            <div class="log-item log-info">
-                                <span class="log-icon">•</span>
-                                <span class="log-text">{{ . }}</span>
-                            </div>
-                        {{ end }}
+                        <div class="log-item">
+                            <span class="log-text">{{ . }}</span>
+                        </div>
                     {{ end }}
                 </div>
             </details>
@@ -553,7 +265,7 @@ const HTML_TEMPLATE = `
         
         <form method="POST" autocomplete="off" id="mainForm">
             <label for="linksInput">🔗 粘贴混合内容（最大支持解析 {{ .MaxLinks }} 个节点）</label>
-            <textarea name="links" id="linksInput" autocomplete="off" placeholder="支持混合输入：&#10;• 多个订阅链接 (http/https)&#10;• 多协议节点链接 (tuic://, vless://, ss:// 等)&#10;• Clash/Mihomo 配置 (YAML)"></textarea>
+            <textarea name="links" id="linksInput" autocomplete="off" placeholder="支持混合输入：&#10;• 多个订阅链接 (http/https)&#10;• 多协议节点链接 (tuic://, vless://, ss:// 等)&#10;• 完整的或部分的 Clash/Mihomo 配置 (YAML)">{{ .Links }}</textarea>
             
             <div class="options-bar">
                 <label title="开启后可生成持久短链订阅">
@@ -571,15 +283,15 @@ const HTML_TEMPLATE = `
             </div>
             
             <div class="btn-group">
-                <button type="submit" class="btn-all" id="submitBtn">开始转换</button>
+                <button type="submit" id="submitBtn">开始转换</button>
             </div>
         </form>
 
         {{ if .SubUrl }}
-            <label style="color: var(--success-text); margin-top: 16px; display: block;">生成成功！专属订阅短链接：</label>
+            <label style="color: var(--success-text); margin-top: 16px; display: block;">专属订阅短链接（7天不使用将过期）：</label>
             <div class="sub-box">
                 <input type="text" readonly id="subUrl" class="sub-input" value="{{ .SubUrl }}">
-                <button type="button" class="btn-all" id="copySubBtn" onclick="copyText('subUrl', 'copySubBtn')" style="margin: 0; min-width: 100px; padding: 10px 16px;">复制</button>
+                <button type="button" onclick="copyText('subUrl', this)" style="margin: 0; min-width: 100px; padding: 10px 16px;">复制</button>
             </div>
         {{ end }}
 
@@ -588,7 +300,7 @@ const HTML_TEMPLATE = `
                 <label>📄 配置预览 (YAML)</label>
                 <textarea readonly id="res" autocomplete="off">{{ .Result }}</textarea>
                 <div style="padding: 12px 16px; background: #f8fafc; border-top: 1px solid var(--border);">
-                    <button type="button" class="btn-all" id="copyResBtn" onclick="copyText('res', 'copyResBtn')" style="min-width: 160px;">复制预览结果</button>
+                    <button type="button" onclick="copyText('res', this)" style="min-width: 160px;">复制预览结果</button>
                 </div>
             </div>
         {{ end }}
@@ -597,13 +309,9 @@ const HTML_TEMPLATE = `
     <div class="footer">谦谦出品</div>
 
     <script>
-        // ✅ 刷新页面时强制回到初始状态，防止浏览器缓存 POST 结果
         window.addEventListener('load', function() {
             const form = document.getElementById('mainForm');
-            if (form) {
-                form.reset(); // 清空输入框并重置复选框到 HTML 默认状态
-            }
-            // 替换当前历史记录，防止 F5 触发“确认重新提交表单”提示
+            if (form) form.reset(); 
             if (window.history.replaceState) {
                 window.history.replaceState(null, null, window.location.href);
             }
@@ -612,46 +320,16 @@ const HTML_TEMPLATE = `
         document.addEventListener('DOMContentLoaded', function() {
             const form = document.getElementById('mainForm');
             const submitBtn = document.getElementById('submitBtn');
-            
             form.addEventListener('submit', function(e) {
-                if (submitBtn.classList.contains('btn-loading')) {
-                    e.preventDefault();
-                    return;
-                }
-                submitBtn.classList.add('btn-loading');
-                submitBtn.innerHTML = '<span class="spinner"></span>转换中...';
+                if (submitBtn.disabled) { e.preventDefault(); return; }
+                submitBtn.innerText = '转换中...';
                 submitBtn.disabled = true;
             });
-
-            // 默认展开检测详情（如果有结果）
-            const details = document.querySelector('.filter-card details');
-            if (details && {{ if .FilterResults }}true{{ else }}false{{ end }}) {
-                details.open = true;
-            }
         });
 
-        function copyText(elementId, btnId) {
+        function copyText(elementId, btn) {
             const el = document.getElementById(elementId);
-            const btn = document.getElementById(btnId);
             const originalText = btn.innerText;
-            
-            const successCallback = () => {
-                btn.innerText = '✓ 已复制';
-                btn.style.background = 'var(--success)';
-                setTimeout(() => {
-                    btn.innerText = originalText;
-                    btn.style.background = '';
-                }, 2000);
-            };
-            
-            if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(el.value).then(successCallback).catch(() => fallbackCopy(el, btn, originalText));
-            } else {
-                fallbackCopy(el, btn, originalText);
-            }
-        }
-        
-        function fallbackCopy(el, btn, originalText) {
             el.select();
             el.setSelectionRange(0, 99999);
             document.execCommand('copy');
@@ -659,7 +337,7 @@ const HTML_TEMPLATE = `
             btn.style.background = 'var(--success)';
             setTimeout(() => {
                 btn.innerText = originalText;
-                btn.style.background = '';
+                btn.style.background = 'var(--primary)';
             }, 2000);
         }
     </script>
@@ -856,6 +534,7 @@ func runL7Filter(proxies []map[string]interface{}) ([]map[string]interface{}, in
 		}
 		os.Remove(cfgPath)
 
+		// 测速完成后立即清理 Mihomo 产生的缓存数据库，减少磁盘和内存占用
 		cachePath := filepath.Join(MIHOMO_DIR, "cache.db")
 		if _, err := os.Stat(cachePath); err == nil {
 			os.Remove(cachePath)
@@ -1357,7 +1036,6 @@ func extractProxyBlocks(lines []string) []map[string]interface{} {
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		// 如果发现 proxies: 根节点声明，开始收集
 		if strings.HasPrefix(trimmed, "proxies:") {
 			inProxies = true
 			if len(currentBlock) > 0 {
@@ -1368,7 +1046,6 @@ func extractProxyBlocks(lines []string) []map[string]interface{} {
 		}
 
 		if inProxies {
-			// 如果该行没有任何前置空格，且不是 -（列表项）也不是 #（注释），则认为遇到了下一个根节点
 			if len(line) > 0 && line[0] != ' ' && line[0] != '-' && line[0] != '#' && strings.Contains(line, ":") {
 				inProxies = false
 				parseYamlArray(currentBlock, &proxies)
@@ -1378,12 +1055,9 @@ func extractProxyBlocks(lines []string) []map[string]interface{} {
 			currentBlock = append(currentBlock, line)
 		}
 	}
-	// 处理最后一个可能未闭合的块
 	if inProxies && len(currentBlock) > 0 {
 		parseYamlArray(currentBlock, &proxies)
 	}
-
-	// 如果没有找到明确的 proxies: 标记，则可能用户粘贴了纯节点数组，尝试整体作为一个数组解析
 	if len(proxies) == 0 {
 		parseYamlArray(lines, &proxies)
 	}
@@ -1391,7 +1065,7 @@ func extractProxyBlocks(lines []string) []map[string]interface{} {
 	return proxies
 }
 
-// --- 新增：节点名称去重逻辑 ---
+// --- 节点名称去重逻辑 ---
 func deduplicateProxyNames(proxies []map[string]interface{}) {
 	seenNames := make(map[string]bool)
 	for _, p := range proxies {
@@ -1421,7 +1095,6 @@ func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]in
 	var rawLinks []string
 	var textLines []string
 
-	// 正则匹配明确的代理链接格式或 HTTP 订阅链接
 	linkRegex := regexp.MustCompile(`(?i)^(https?|vmess|vless|ss|ssr|trojan|tuic|hysteria|hysteria2|hy2)://`)
 
 	for _, line := range lines {
@@ -1429,26 +1102,21 @@ func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]in
 		if trimmed == "" {
 			continue
 		}
-		// 如果这一行完全符合链接格式（不含空格的连续字符串），归入 links 处理池
 		if linkRegex.MatchString(trimmed) && !strings.Contains(trimmed, " ") {
 			rawLinks = append(rawLinks, trimmed)
 		} else {
-			// 将其它格式归入 textLines，需保留原始前置空格以维持 YAML 缩进正确性
 			textLines = append(textLines, line)
 		}
 	}
 
-	// 1. 处理直链及远程 http 订阅 (将其转交 generateProxies，暂时关闭内置 filter)
 	if len(rawLinks) > 0 {
 		proxies, errs, _, _ := generateProxies(rawLinks, false)
 		allProxies = append(allProxies, proxies...)
 		allErrs = append(allErrs, errs...)
 	}
 
-	// 2. 处理剩余文本内容（可能包含完整的 YAML、纯节点配置、Base64 订阅信息等）
 	restText := strings.Join(textLines, "\n")
 	if strings.TrimSpace(restText) != "" {
-		// 尝试去除换行后做 Base64 检查
 		b64Str := strings.ReplaceAll(restText, "\n", "")
 		b64Str = strings.ReplaceAll(b64Str, "\r", "")
 
@@ -1458,12 +1126,10 @@ func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]in
 			allProxies = append(allProxies, proxies...)
 			allErrs = append(allErrs, errs...)
 		} else {
-			// 作为 YAML 内容进行处理：首先尝试抽取 proxies 数组块
 			yamlProxies := extractProxyBlocks(textLines)
 			if len(yamlProxies) > 0 {
 				allProxies = append(allProxies, yamlProxies...)
 			} else {
-				// 兜底策略：作为完整单文档尝试解析
 				var doc struct {
 					Proxies []map[string]interface{} `yaml:"proxies"`
 				}
@@ -1478,15 +1144,13 @@ func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]in
 		}
 	}
 
-	// 执行数量限制截断
 	if len(allProxies) > MAX_LINKS {
 		allProxies = allProxies[:MAX_LINKS]
 	}
 
-	// ✅ 关键修复：在测速和输出之前，强制对所有节点名称进行去重处理
+	// 强制对所有节点名称进行去重处理
 	deduplicateProxyNames(allProxies)
 
-	// 统一进行连通性检测（如果需要的话），避免对多处分离的代理执行多次测试
 	var stats *Stats
 	var filterResults []string
 	if filterMode && len(allProxies) > 0 {
@@ -1619,18 +1283,24 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 
 	id := r.URL.Query().Get("id")
 	if id != "" {
-		shortLinkMu.RLock()
+		shortLinkMu.Lock()
 		sl, exists := shortLinks[id]
-		shortLinkMu.RUnlock()
+		if exists {
+			// 每次短链被拉取访问时，更新活跃时间戳
+			sl.LastAccessedAt = time.Now()
+			shortLinks[id] = sl
+			saveShortLinks()
+		}
+		shortLinkMu.Unlock()
+
 		if !exists {
-			http.Error(w, "订阅短链接不存在或已失效", http.StatusNotFound)
+			http.Error(w, "订阅短链接不存在或已过期", http.StatusNotFound)
 			return
 		}
 		encodedData = sl.Data
 		filterMode = sl.FilterMode
 		fullConfig = sl.FullConfig
 	} else {
-		// 兼容旧版的长链接请求
 		encodedData = r.URL.Query().Get("data")
 		filterMode = r.URL.Query().Get("filter") == "1"
 		fullConfig = r.URL.Query().Get("full") == "1"
@@ -1664,6 +1334,9 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// 启动后台自动清理过期短链的协程
+	startCleanupTask()
+
 	http.HandleFunc("/", requiresAuth(indexHandler))
 	http.HandleFunc("/sub", requiresAuth(subHandler))
 
