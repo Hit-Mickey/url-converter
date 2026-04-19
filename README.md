@@ -30,7 +30,7 @@ services:
   url-converter:
     image: mickey666/url-converter:latest
     container_name: url-converter
-    restart: always
+    restart: unless-stopped
     ports:
       - "5000:5000"
     environment:
@@ -109,7 +109,7 @@ services:
   url-converter:
     image: mickey666/url-converter:latest
     container_name: url-converter
-    restart: always
+    restart: unless-stopped
     ports:
       - "5000:5000"
     environment:
