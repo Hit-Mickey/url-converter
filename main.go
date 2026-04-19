@@ -75,13 +75,17 @@ func requiresAuth(f http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// --- HTML 前端模板 (优化布局版) ---
+// --- HTML 前端模板 ---
 const HTML_TEMPLATE = `
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- ✅ 防止浏览器缓存 POST 响应，确保刷新始终获取干净的 GET 初始页面 -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, post-check=0, pre-check=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>订阅转换器</title>
     <style>
         :root {
@@ -216,23 +220,20 @@ const HTML_TEMPLATE = `
             box-shadow: 0 2px 4px rgba(0,0,0,0.08);
             min-width: 140px;
         }
-        button:hover {
+        button:hover:not(:disabled) {
             filter: brightness(1.05);
             transform: translateY(-1px);
             box-shadow: 0 4px 8px rgba(0,0,0,0.12);
         }
-        button:active {
+        button:active:not(:disabled) {
             transform: translateY(0);
         }
-        .btn-all { background: var(--primary); }
-        .btn-all:hover { background: var(--primary-hover); }
-        .btn-secondary {
-            background: #f4f4f5;
-            color: var(--text);
-            border: 1px solid var(--border);
-            box-shadow: none;
+        button:disabled {
+            opacity: 0.8;
+            cursor: not-allowed;
         }
-        .btn-secondary:hover { background: #e4e4e7; }
+        .btn-all { background: var(--primary); }
+        .btn-all:hover:not(:disabled) { background: var(--primary-hover); }
         
         .footer {
             margin-top: 32px;
@@ -308,7 +309,7 @@ const HTML_TEMPLATE = `
         }
         .sub-input:focus { border-color: var(--primary); }
         
-        /* 🎨 优化后的节点检测详情模块 - 卡片式设计 */
+        /* 节点检测详情模块 */
         .filter-card {
             background: var(--card-bg);
             border: 1px solid var(--border);
@@ -339,12 +340,13 @@ const HTML_TEMPLATE = `
             content: "▶";
             font-size: 0.8rem;
             color: var(--text-muted);
-            transition: transform 0.2s;
+            transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
             display: inline-block;
         }
-        .filter-card[open] summary::before {
+        .filter-card details[open] > summary::before {
             transform: rotate(90deg);
         }
+        
         .filter-stats-inline {
             display: inline-flex;
             align-items: center;
@@ -358,16 +360,8 @@ const HTML_TEMPLATE = `
             border-radius: 20px;
             font-size: 0.8rem;
         }
-        .stat-badge.pass {
-            background: var(--success-bg);
-            color: var(--success-text);
-            border: 1px solid var(--success-border);
-        }
-        .stat-badge.fail {
-            background: var(--danger-bg);
-            color: var(--danger-text);
-            border: 1px solid var(--danger-border);
-        }
+        .stat-badge.pass { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+        .stat-badge.fail { background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); }
         
         .filter-log {
             padding: 12px 18px 18px;
@@ -381,7 +375,6 @@ const HTML_TEMPLATE = `
         .filter-log::-webkit-scrollbar { width: 6px; }
         .filter-log::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 3px; }
         .filter-log::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-        .filter-log::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         
         .log-item {
             padding: 6px 0;
@@ -396,19 +389,13 @@ const HTML_TEMPLATE = `
             from { opacity: 0; transform: translateY(4px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        .log-icon {
-            flex-shrink: 0;
-            width: 18px;
-            text-align: center;
-            font-weight: bold;
-        }
+        .log-icon { flex-shrink: 0; width: 18px; text-align: center; font-weight: bold; }
         .log-pass .log-icon { color: var(--success); }
         .log-fail .log-icon { color: var(--danger); }
         .log-info .log-icon { color: var(--text-muted); }
         .log-pass { color: #065f46; }
         .log-fail { color: #991b1b; }
         .log-info { color: var(--text-muted); }
-        .log-text { flex: 1; word-break: break-all; }
         
         /* 结果预览区域 */
         .result-card {
@@ -433,6 +420,22 @@ const HTML_TEMPLATE = `
             background: #fff;
         }
         
+        /* 转换按钮加载动画 */
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 0.75s linear infinite;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         @media (max-width: 600px) {
             .container { padding: 20px 16px; }
             .header h2 { font-size: 1.4rem; }
@@ -446,7 +449,7 @@ const HTML_TEMPLATE = `
 <body>
     <div class="container">
         <div class="header">
-            <h2>🔄 订阅转换器</h2>
+            <h2>订阅转换器</h2>
             <p>支持 Clash / SingBox / Mihomo 格式 · 节点连通性检测</p>
         </div>
         
@@ -513,21 +516,21 @@ const HTML_TEMPLATE = `
             <div class="options-bar">
                 <label title="开启后可生成持久订阅链接">
                     <input type="checkbox" name="hosted" value="1" {{ if .HostedMode }}checked{{ end }}>
-                    🗂️ 托管模式
+                    托管模式
                 </label>
                 <label title="自动测试节点连通性并剔除无效节点">
                     <input type="checkbox" name="filter" value="1" {{ if .FilterMode }}checked{{ end }}>
-                    🎯 剔除无效节点
+                    剔除无效节点
                 </label>
             </div>
             
             <div class="btn-group">
-                <button type="submit" class="btn-all">✨ 开始转换</button>
+                <button type="submit" class="btn-all" id="submitBtn">开始转换</button>
             </div>
         </form>
 
         {{ if .SubUrl }}
-            <label style="color: var(--success-text); margin-top: 16px; display: block;">✅ 生成成功！专属订阅链接：</label>
+            <label style="color: var(--success-text); margin-top: 16px; display: block;">生成成功！专属订阅链接：</label>
             <div class="sub-box">
                 <input type="text" readonly id="subUrl" class="sub-input" value="{{ .SubUrl }}">
                 <button type="button" class="btn-all" id="copySubBtn" onclick="copyText('subUrl', 'copySubBtn')" style="margin: 0; min-width: 100px; padding: 10px 16px;">复制</button>
@@ -539,23 +542,43 @@ const HTML_TEMPLATE = `
                 <label>📄 配置预览 (YAML)</label>
                 <textarea readonly id="res" autocomplete="off">{{ .Result }}</textarea>
                 <div style="padding: 12px 16px; background: #f8fafc; border-top: 1px solid var(--border);">
-                    <button type="button" class="btn-secondary" id="copyResBtn" onclick="copyText('res', 'copyResBtn')" style="min-width: 160px;">📋 复制预览结果</button>
+                    <button type="button" class="btn-all" id="copyResBtn" onclick="copyText('res', 'copyResBtn')" style="min-width: 160px;">复制预览结果</button>
                 </div>
             </div>
         {{ end }}
     </div>
     
-    <div class="footer">
-        <span>谦谦出品</span> · 
-        <span style="color: var(--text-muted);">v2.0</span>
-    </div>
+    <!-- ✅ 底部仅保留指定文字 -->
+    <div class="footer">谦谦出品</div>
 
     <script>
-        if (window.history.replaceState) {
-            window.history.replaceState(null, null, window.location.href);
-        }
-        // 默认展开检测详情（如果有结果）
+        // ✅ 刷新页面时强制回到初始状态，防止浏览器缓存 POST 结果
+        window.addEventListener('load', function() {
+            const form = document.getElementById('mainForm');
+            if (form) {
+                form.reset(); // 清空输入框并重置复选框到 HTML 默认状态
+            }
+            // 替换当前历史记录，防止 F5 触发“确认重新提交表单”提示
+            if (window.history.replaceState) {
+                window.history.replaceState(null, null, window.location.href);
+            }
+        });
+
         document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('mainForm');
+            const submitBtn = document.getElementById('submitBtn');
+            
+            form.addEventListener('submit', function(e) {
+                if (submitBtn.classList.contains('btn-loading')) {
+                    e.preventDefault();
+                    return;
+                }
+                submitBtn.classList.add('btn-loading');
+                submitBtn.innerHTML = '<span class="spinner"></span>转换中...';
+                submitBtn.disabled = true;
+            });
+
+            // 默认展开检测详情（如果有结果）
             const details = document.querySelector('.filter-card details');
             if (details && {{ if .FilterResults }}true{{ else }}false{{ end }}) {
                 details.open = true;
@@ -567,15 +590,17 @@ const HTML_TEMPLATE = `
             const btn = document.getElementById(btnId);
             const originalText = btn.innerText;
             
+            const successCallback = () => {
+                btn.innerText = '✓ 已复制';
+                btn.style.background = 'var(--success)';
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                    btn.style.background = '';
+                }, 2000);
+            };
+            
             if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(el.value).then(() => {
-                    btn.innerText = '✓ 已复制';
-                    btn.style.background = 'var(--success)';
-                    setTimeout(() => {
-                        btn.innerText = originalText;
-                        btn.style.background = '';
-                    }, 2000);
-                }).catch(() => fallbackCopy(el, btn, originalText));
+                navigator.clipboard.writeText(el.value).then(successCallback).catch(() => fallbackCopy(el, btn, originalText));
             } else {
                 fallbackCopy(el, btn, originalText);
             }
