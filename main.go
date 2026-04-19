@@ -855,6 +855,11 @@ func runL7Filter(proxies []map[string]interface{}) ([]map[string]interface{}, in
 			cmd.Wait()
 		}
 		os.Remove(cfgPath)
+
+		cachePath := filepath.Join(MIHOMO_DIR, "cache.db")
+		if _, err := os.Stat(cachePath); err == nil {
+			os.Remove(cachePath)
+		}
 	}()
 
 	apiBase := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
