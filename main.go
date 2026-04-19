@@ -215,7 +215,6 @@ const HTML_TEMPLATE = `
     <div class="container">
         <div class="header">
             <h2>订阅转换器</h2>
-            <p>支持多配置混合 / 连通性检测 / 自动过期清理 (7天未用)</p>
         </div>
         
         <div class="alert">{{ .Error }}</div>
