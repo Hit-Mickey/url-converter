@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/md5"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -35,6 +37,19 @@ var (
 	MIHOMO_BIN string
 )
 
+// --- 短链系统存储 ---
+type ShortLink struct {
+	Data       string `json:"data"`
+	FilterMode bool   `json:"filter"`
+	FullConfig bool   `json:"full"`
+}
+
+var (
+	shortLinkMu    sync.RWMutex
+	shortLinks     = make(map[string]ShortLink)
+	shortLinksFile string
+)
+
 func init() {
 	cwd, _ := os.Getwd()
 	MIHOMO_DIR = filepath.Join(cwd, "core")
@@ -42,6 +57,34 @@ func init() {
 	if runtime.GOOS == "windows" {
 		MIHOMO_BIN += ".exe"
 	}
+	shortLinksFile = filepath.Join(MIHOMO_DIR, "shortlinks.json")
+	loadShortLinks()
+}
+
+func loadShortLinks() {
+	os.MkdirAll(MIHOMO_DIR, 0755)
+	b, err := os.ReadFile(shortLinksFile)
+	if err == nil {
+		json.Unmarshal(b, &shortLinks)
+	}
+}
+
+func saveShortLinks() {
+	b, _ := json.MarshalIndent(shortLinks, "", "  ")
+	os.WriteFile(shortLinksFile, b, 0644)
+}
+
+func getOrCreateShortLink(data string, filter, full bool) string {
+	h := md5.Sum([]byte(fmt.Sprintf("%s|%v|%v", data, filter, full)))
+	id := hex.EncodeToString(h[:])[:8]
+
+	shortLinkMu.Lock()
+	defer shortLinkMu.Unlock()
+	if _, exists := shortLinks[id]; !exists {
+		shortLinks[id] = ShortLink{Data: data, FilterMode: filter, FullConfig: full}
+		saveShortLinks()
+	}
+	return id
 }
 
 // --- 授权验证逻辑 ---
@@ -82,7 +125,6 @@ const HTML_TEMPLATE = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- ✅ 防止浏览器缓存 POST 响应，确保刷新始终获取干净的 GET 初始页面 -->
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, post-check=0, pre-check=0">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
@@ -450,7 +492,7 @@ const HTML_TEMPLATE = `
     <div class="container">
         <div class="header">
             <h2>订阅转换器</h2>
-            <p>支持 Clash / SingBox / Mihomo 格式 · 节点连通性检测</p>
+            <p>支持多配置混合/多协议直链/订阅链接 · 节点连通性检测</p>
         </div>
         
         <div class="alert">{{ .Error }}</div>
@@ -510,17 +552,21 @@ const HTML_TEMPLATE = `
         {{ end }}
         
         <form method="POST" autocomplete="off" id="mainForm">
-            <label for="linksInput">🔗 粘贴链接（一行一个，最多 {{ .MaxLinks }} 个）</label>
-            <textarea name="links" id="linksInput" autocomplete="off" placeholder="支持输入：&#10;• 订阅链接 (http/https)&#10;• 节点链接 (tuic://, vless://, ss://, vmess:// 等)">{{ .Links }}</textarea>
+            <label for="linksInput">🔗 粘贴混合内容（最大支持解析 {{ .MaxLinks }} 个节点）</label>
+            <textarea name="links" id="linksInput" autocomplete="off" placeholder="支持混合输入：&#10;• 多个订阅链接 (http/https)&#10;• 多协议节点链接 (tuic://, vless://, ss:// 等)&#10;• Clash/Mihomo 配置 (YAML)"></textarea>
             
             <div class="options-bar">
-                <label title="开启后可生成持久订阅链接">
+                <label title="开启后可生成持久短链订阅">
                     <input type="checkbox" name="hosted" value="1" {{ if .HostedMode }}checked{{ end }}>
                     托管模式
                 </label>
                 <label title="自动测试节点连通性并剔除无效节点">
                     <input type="checkbox" name="filter" value="1" {{ if .FilterMode }}checked{{ end }}>
                     剔除无效节点
+                </label>
+                <label title="生成完整的包含路由和策略组的配置文件">
+                    <input type="checkbox" name="full" value="1" {{ if .FullConfig }}checked{{ end }}>
+                    生成完整配置
                 </label>
             </div>
             
@@ -530,7 +576,7 @@ const HTML_TEMPLATE = `
         </form>
 
         {{ if .SubUrl }}
-            <label style="color: var(--success-text); margin-top: 16px; display: block;">生成成功！专属订阅链接：</label>
+            <label style="color: var(--success-text); margin-top: 16px; display: block;">生成成功！专属订阅短链接：</label>
             <div class="sub-box">
                 <input type="text" readonly id="subUrl" class="sub-input" value="{{ .SubUrl }}">
                 <button type="button" class="btn-all" id="copySubBtn" onclick="copyText('subUrl', 'copySubBtn')" style="margin: 0; min-width: 100px; padding: 10px 16px;">复制</button>
@@ -548,7 +594,6 @@ const HTML_TEMPLATE = `
         {{ end }}
     </div>
     
-    <!-- ✅ 底部仅保留指定文字 -->
     <div class="footer">谦谦出品</div>
 
     <script>
@@ -631,6 +676,7 @@ type TemplateData struct {
 	Links         string
 	HostedMode    bool
 	FilterMode    bool
+	FullConfig    bool
 	SubUrl        string
 	Result        string
 }
@@ -1283,6 +1329,206 @@ func generateProxies(lines []string, filterMode bool) ([]map[string]interface{},
 	return proxies, errorDetails, stats, filterResults
 }
 
+// 辅助方法：判断解码后的内容是否包含常见协议头部
+func isLikelyBase64Links(data []byte) bool {
+	str := string(data)
+	return strings.Contains(str, "://")
+}
+
+// 辅助方法：解析纯 YAML 节点数组
+func parseYamlArray(lines []string, proxies *[]map[string]interface{}) {
+	str := strings.Join(lines, "\n")
+	var arr []map[string]interface{}
+	if err := yaml.Unmarshal([]byte(str), &arr); err == nil && len(arr) > 0 {
+		*proxies = append(*proxies, arr...)
+	}
+}
+
+// 辅助方法：智能从混合文本中抽取只属于 proxies: 下的块
+func extractProxyBlocks(lines []string) []map[string]interface{} {
+	var proxies []map[string]interface{}
+	inProxies := false
+	var currentBlock []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// 如果发现 proxies: 根节点声明，开始收集
+		if strings.HasPrefix(trimmed, "proxies:") {
+			inProxies = true
+			if len(currentBlock) > 0 {
+				parseYamlArray(currentBlock, &proxies)
+				currentBlock = nil
+			}
+			continue
+		}
+
+		if inProxies {
+			// 如果该行没有任何前置空格，且不是 -（列表项）也不是 #（注释），则认为遇到了下一个根节点
+			if len(line) > 0 && line[0] != ' ' && line[0] != '-' && line[0] != '#' && strings.Contains(line, ":") {
+				inProxies = false
+				parseYamlArray(currentBlock, &proxies)
+				currentBlock = nil
+				continue
+			}
+			currentBlock = append(currentBlock, line)
+		}
+	}
+	// 处理最后一个可能未闭合的块
+	if inProxies && len(currentBlock) > 0 {
+		parseYamlArray(currentBlock, &proxies)
+	}
+
+	// 如果没有找到明确的 proxies: 标记，则可能用户粘贴了纯节点数组，尝试整体作为一个数组解析
+	if len(proxies) == 0 {
+		parseYamlArray(lines, &proxies)
+	}
+
+	return proxies
+}
+
+// --- 新增：节点名称去重逻辑 ---
+func deduplicateProxyNames(proxies []map[string]interface{}) {
+	seenNames := make(map[string]bool)
+	for _, p := range proxies {
+		name, ok := p["name"].(string)
+		if !ok {
+			continue
+		}
+
+		originalName := name
+		counter := 1
+		// 如果名字已经存在，则不断加后缀直到唯一
+		for seenNames[name] {
+			name = fmt.Sprintf("%s_%d", originalName, counter)
+			counter++
+		}
+
+		p["name"] = name
+		seenNames[name] = true
+	}
+}
+
+func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]interface{}, []string, *Stats, []string) {
+	var allProxies []map[string]interface{}
+	var allErrs []string
+
+	lines := strings.Split(inputText, "\n")
+	var rawLinks []string
+	var textLines []string
+
+	// 正则匹配明确的代理链接格式或 HTTP 订阅链接
+	linkRegex := regexp.MustCompile(`(?i)^(https?|vmess|vless|ss|ssr|trojan|tuic|hysteria|hysteria2|hy2)://`)
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// 如果这一行完全符合链接格式（不含空格的连续字符串），归入 links 处理池
+		if linkRegex.MatchString(trimmed) && !strings.Contains(trimmed, " ") {
+			rawLinks = append(rawLinks, trimmed)
+		} else {
+			// 将其它格式归入 textLines，需保留原始前置空格以维持 YAML 缩进正确性
+			textLines = append(textLines, line)
+		}
+	}
+
+	// 1. 处理直链及远程 http 订阅 (将其转交 generateProxies，暂时关闭内置 filter)
+	if len(rawLinks) > 0 {
+		proxies, errs, _, _ := generateProxies(rawLinks, false)
+		allProxies = append(allProxies, proxies...)
+		allErrs = append(allErrs, errs...)
+	}
+
+	// 2. 处理剩余文本内容（可能包含完整的 YAML、纯节点配置、Base64 订阅信息等）
+	restText := strings.Join(textLines, "\n")
+	if strings.TrimSpace(restText) != "" {
+		// 尝试去除换行后做 Base64 检查
+		b64Str := strings.ReplaceAll(restText, "\n", "")
+		b64Str = strings.ReplaceAll(b64Str, "\r", "")
+
+		if decoded, err := decodeBase64Safe(b64Str); err == nil && isLikelyBase64Links(decoded) {
+			b64Lines := strings.Split(string(decoded), "\n")
+			proxies, errs, _, _ := generateProxies(b64Lines, false)
+			allProxies = append(allProxies, proxies...)
+			allErrs = append(allErrs, errs...)
+		} else {
+			// 作为 YAML 内容进行处理：首先尝试抽取 proxies 数组块
+			yamlProxies := extractProxyBlocks(textLines)
+			if len(yamlProxies) > 0 {
+				allProxies = append(allProxies, yamlProxies...)
+			} else {
+				// 兜底策略：作为完整单文档尝试解析
+				var doc struct {
+					Proxies []map[string]interface{} `yaml:"proxies"`
+				}
+				if err := yaml.Unmarshal([]byte(restText), &doc); err == nil && len(doc.Proxies) > 0 {
+					allProxies = append(allProxies, doc.Proxies...)
+				} else {
+					if len(textLines) > 0 {
+						allErrs = append(allErrs, "部分混合文本未能识别为有效的配置或代理")
+					}
+				}
+			}
+		}
+	}
+
+	// 执行数量限制截断
+	if len(allProxies) > MAX_LINKS {
+		allProxies = allProxies[:MAX_LINKS]
+	}
+
+	// ✅ 关键修复：在测速和输出之前，强制对所有节点名称进行去重处理
+	deduplicateProxyNames(allProxies)
+
+	// 统一进行连通性检测（如果需要的话），避免对多处分离的代理执行多次测试
+	var stats *Stats
+	var filterResults []string
+	if filterMode && len(allProxies) > 0 {
+		filteredProxies, total, dead, results := runL7Filter(allProxies)
+		allProxies = filteredProxies
+		filterResults = results
+		stats = &Stats{Total: total, Dead: dead, Alive: total - dead}
+	}
+
+	return allProxies, allErrs, stats, filterResults
+}
+
+func buildOutput(proxies []map[string]interface{}, fullConfig bool) []byte {
+	if !fullConfig {
+		b, _ := yaml.Marshal(map[string]interface{}{"proxies": proxies})
+		return b
+	}
+
+	var proxyNames []string
+	for _, p := range proxies {
+		if name, ok := p["name"].(string); ok {
+			proxyNames = append(proxyNames, name)
+		}
+	}
+
+	config := map[string]interface{}{
+		"port":       7890,
+		"socks-port": 7891,
+		"allow-lan":  true,
+		"mode":       "rule",
+		"log-level":  "info",
+		"proxies":    proxies,
+		"proxy-groups": []map[string]interface{}{
+			{
+				"name":    "PROXIES",
+				"type":    "select",
+				"proxies": append([]string{"DIRECT"}, proxyNames...),
+			},
+		},
+		"rules": []string{
+			"MATCH,PROXIES",
+		},
+	}
+	b, _ := yaml.Marshal(config)
+	return b
+}
+
 // --- 路由 ---
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
@@ -1291,48 +1537,46 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl, _ := template.New("index").Funcs(funcMap).Parse(HTML_TEMPLATE)
 	data := TemplateData{MaxLinks: MAX_LINKS}
+
 	if r.Method == "GET" {
 		data.HostedMode = true
 		data.FilterMode = true
 		tmpl.Execute(w, data)
 		return
 	}
+
 	if r.Method == "POST" {
 		r.ParseForm()
 		data.HostedMode = r.FormValue("hosted") == "1"
 		data.FilterMode = r.FormValue("filter") == "1"
+		data.FullConfig = r.FormValue("full") == "1"
 		linksText := r.FormValue("links")
 		data.Links = linksText
-		linesRaw := strings.Split(linksText, "\n")
-		var lines []string
-		for _, l := range linesRaw {
-			if l = strings.TrimSpace(l); l != "" {
-				lines = append(lines, l)
-			}
-		}
-		if len(lines) == 0 {
-			data.Error = "请输入链接内容。"
+
+		if strings.TrimSpace(linksText) == "" {
+			data.Error = "请输入混合链接内容或配置文件。"
 			tmpl.Execute(w, data)
 			return
 		}
-		if len(lines) > MAX_LINKS {
-			data.Error = fmt.Sprintf("为防止滥用，单次最多允许处理 %d 个链接。已为您截断。", MAX_LINKS)
-			lines = lines[:MAX_LINKS]
-		}
-		proxies, errs, stats, filterResults := generateProxies(lines, data.FilterMode)
+
+		proxies, errs, stats, filterResults := extractProxiesFromInput(linksText, data.FilterMode)
+
 		data.ErrorDetails = errs
 		data.FilterStats = stats
 		data.FilterResults = filterResults
+
 		if len(proxies) == 0 && len(errs) > 0 && !data.FilterMode {
 			if data.Error == "" {
 				data.Error = "处理失败，所有输入均未能成功解析。"
 			}
 		}
+
 		if len(proxies) > 0 {
-			yamlBytes, _ := yaml.Marshal(map[string]interface{}{"proxies": proxies})
+			yamlBytes := buildOutput(proxies, data.FullConfig)
 			data.Result = string(yamlBytes)
+
 			if data.HostedMode {
-				b64Data := base64.URLEncoding.EncodeToString([]byte(strings.Join(lines, "\n")))
+				b64Data := base64.URLEncoding.EncodeToString([]byte(linksText))
 				scheme := r.Header.Get("X-Forwarded-Proto")
 				if scheme == "" {
 					scheme = "http"
@@ -1349,12 +1593,10 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 					baseUrl += fmt.Sprintf("%s:%s@", url.QueryEscape(AUTH_USERNAME), url.QueryEscape(AUTH_PASSWORD))
 				}
 				baseUrl += host + "/sub"
-				params := url.Values{}
-				params.Add("data", b64Data)
-				if data.FilterMode {
-					params.Add("filter", "1")
-				}
-				data.SubUrl = fmt.Sprintf("%s?%s", baseUrl, params.Encode())
+
+				// 生成本地持久化短链 ID
+				id := getOrCreateShortLink(b64Data, data.FilterMode, data.FullConfig)
+				data.SubUrl = fmt.Sprintf("%s?id=%s", baseUrl, id)
 			}
 		}
 		tmpl.Execute(w, data)
@@ -1366,34 +1608,49 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	filterMode := r.URL.Query().Get("filter") == "1"
-	encodedData := r.URL.Query().Get("data")
+
+	var filterMode, fullConfig bool
+	var encodedData string
+
+	id := r.URL.Query().Get("id")
+	if id != "" {
+		shortLinkMu.RLock()
+		sl, exists := shortLinks[id]
+		shortLinkMu.RUnlock()
+		if !exists {
+			http.Error(w, "订阅短链接不存在或已失效", http.StatusNotFound)
+			return
+		}
+		encodedData = sl.Data
+		filterMode = sl.FilterMode
+		fullConfig = sl.FullConfig
+	} else {
+		// 兼容旧版的长链接请求
+		encodedData = r.URL.Query().Get("data")
+		filterMode = r.URL.Query().Get("filter") == "1"
+		fullConfig = r.URL.Query().Get("full") == "1"
+	}
+
 	if encodedData == "" {
 		http.Error(w, "缺少订阅数据参数", http.StatusBadRequest)
 		return
 	}
+
 	decodedBytes, err := decodeBase64Safe(encodedData)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Base64 解码异常: %v", err), http.StatusBadRequest)
 		return
 	}
-	linesRaw := strings.Split(string(decodedBytes), "\n")
-	var lines []string
-	for _, l := range linesRaw {
-		if l = strings.TrimSpace(l); l != "" {
-			lines = append(lines, l)
-		}
-	}
-	if len(lines) == 0 {
+
+	inputText := string(decodedBytes)
+	if strings.TrimSpace(inputText) == "" {
 		http.Error(w, "订阅内容为空", http.StatusBadRequest)
 		return
 	}
-	if len(lines) > MAX_LINKS {
-		lines = lines[:MAX_LINKS]
-	}
-	proxies, _, _, _ := generateProxies(lines, filterMode)
+
+	proxies, _, _, _ := extractProxiesFromInput(inputText, filterMode)
 	if len(proxies) > 0 {
-		yamlBytes, _ := yaml.Marshal(map[string]interface{}{"proxies": proxies})
+		yamlBytes := buildOutput(proxies, fullConfig)
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		w.Write(yamlBytes)
 	} else {
