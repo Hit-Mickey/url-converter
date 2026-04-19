@@ -31,7 +31,7 @@ import (
 // --- 常量与核心配置 ---
 const MAX_LINKS = 100
 const PING_TIMEOUT_MS = 3000
-const LINK_EXPIRY_DAYS = 7 // 设定过期天数为 7 天
+const LINK_EXPIRY_DAYS = 7 // 过期天数为 7 天
 
 var (
 	MIHOMO_DIR string
@@ -43,7 +43,7 @@ type ShortLink struct {
 	Data           string    `json:"data"`
 	FilterMode     bool      `json:"filter"`
 	FullConfig     bool      `json:"full"`
-	LastAccessedAt time.Time `json:"last_accessed_at"` // 最后访问时间，用于清理判断
+	LastAccessedAt time.Time `json:"last_accessed_at"` // 记录最后使用时间
 }
 
 var (
@@ -61,7 +61,7 @@ func init() {
 	}
 	shortLinksFile = filepath.Join(MIHOMO_DIR, "shortlinks.json")
 
-	// 启动时清理上次可能意外残留的 cache.db
+	// 启动时清理残留 cache.db
 	os.Remove(filepath.Join(MIHOMO_DIR, "cache.db"))
 
 	loadShortLinks()
@@ -76,14 +76,13 @@ func loadShortLinks() {
 }
 
 func saveShortLinks() {
-	// 使用 Indent 让 JSON 文件更具可读性
 	b, _ := json.MarshalIndent(shortLinks, "", "  ")
 	os.WriteFile(shortLinksFile, b, 0644)
 }
 
 // 自动清理过期链接的任务
 func startCleanupTask() {
-	ticker := time.NewTicker(1 * time.Hour) // 每小时检查一次
+	ticker := time.NewTicker(1 * time.Hour)
 	go func() {
 		for range ticker.C {
 			cleanupExpiredLinks()
@@ -98,7 +97,6 @@ func cleanupExpiredLinks() {
 	now := time.Now()
 	count := 0
 	for id, link := range shortLinks {
-		// 如果最后访问时间距离现在超过 7 天，则删除
 		if now.Sub(link.LastAccessedAt) > time.Duration(LINK_EXPIRY_DAYS)*24*time.Hour {
 			delete(shortLinks, id)
 			count++
@@ -121,7 +119,7 @@ func getOrCreateShortLink(data string, filter, full bool) string {
 			Data:           data,
 			FilterMode:     filter,
 			FullConfig:     full,
-			LastAccessedAt: time.Now(), // 初始化访问时间
+			LastAccessedAt: time.Now(),
 		}
 		saveShortLinks()
 	}
@@ -151,7 +149,7 @@ func requiresAuth(f http.HandlerFunc) http.HandlerFunc {
 			user, pass, ok := r.BasicAuth()
 			if !ok || !checkAuth(user, pass) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Login Required"`)
-				http.Error(w, "认证失败。请输入正确的账号密码。", http.StatusUnauthorized)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 		}
@@ -381,7 +379,14 @@ func getFreePort() int {
 }
 
 func ensureCore() {
+	// 动态获取内核版本
+	version := os.Getenv("MIHOMO_VERSION")
+	if version == "" {
+		version = "v1.19.20"
+	}
+
 	if _, err := os.Stat(MIHOMO_BIN); err == nil {
+		// 检查版本是否兼容
 		cmd := exec.Command(MIHOMO_BIN, "-v")
 		cmd.Stdout = nil
 		cmd.Stderr = nil
@@ -393,14 +398,13 @@ func ensureCore() {
 	}
 
 	os.MkdirAll(MIHOMO_DIR, 0755)
-	fmt.Println("⏳ 正在下载对应系统的 Mihomo 核心 (v1.19.20) 用于 L7 测速...")
+	fmt.Printf("⏳ 正在下载对应系统的 Mihomo 核心 (%s) 用于 L7 测速...\n", version)
 
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 	var dlUrl string
 	isZip := false
 
-	version := "v1.19.20"
 	baseURL := "https://github.com/MetaCubeX/mihomo/releases/download/" + version + "/"
 
 	switch osName {
@@ -534,7 +538,7 @@ func runL7Filter(proxies []map[string]interface{}) ([]map[string]interface{}, in
 		}
 		os.Remove(cfgPath)
 
-		// 测速完成后立即清理 Mihomo 产生的缓存数据库，减少磁盘和内存占用
+		// 每次测速完自动清理
 		cachePath := filepath.Join(MIHOMO_DIR, "cache.db")
 		if _, err := os.Stat(cachePath); err == nil {
 			os.Remove(cachePath)
@@ -1013,13 +1017,11 @@ func generateProxies(lines []string, filterMode bool) ([]map[string]interface{},
 	return proxies, errorDetails, stats, filterResults
 }
 
-// 辅助方法：判断解码后的内容是否包含常见协议头部
 func isLikelyBase64Links(data []byte) bool {
 	str := string(data)
 	return strings.Contains(str, "://")
 }
 
-// 辅助方法：解析纯 YAML 节点数组
 func parseYamlArray(lines []string, proxies *[]map[string]interface{}) {
 	str := strings.Join(lines, "\n")
 	var arr []map[string]interface{}
@@ -1028,7 +1030,6 @@ func parseYamlArray(lines []string, proxies *[]map[string]interface{}) {
 	}
 }
 
-// 辅助方法：智能从混合文本中抽取只属于 proxies: 下的块
 func extractProxyBlocks(lines []string) []map[string]interface{} {
 	var proxies []map[string]interface{}
 	inProxies := false
@@ -1076,7 +1077,6 @@ func deduplicateProxyNames(proxies []map[string]interface{}) {
 
 		originalName := name
 		counter := 1
-		// 如果名字已经存在，则不断加后缀直到唯一
 		for seenNames[name] {
 			name = fmt.Sprintf("%s_%d", originalName, counter)
 			counter++
@@ -1148,7 +1148,6 @@ func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]in
 		allProxies = allProxies[:MAX_LINKS]
 	}
 
-	// 强制对所有节点名称进行去重处理
 	deduplicateProxyNames(allProxies)
 
 	var stats *Stats
@@ -1263,7 +1262,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				baseUrl += host + "/sub"
 
-				// 生成本地持久化短链 ID
 				id := getOrCreateShortLink(b64Data, data.FilterMode, data.FullConfig)
 				data.SubUrl = fmt.Sprintf("%s?id=%s", baseUrl, id)
 			}
@@ -1286,7 +1284,6 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 		shortLinkMu.Lock()
 		sl, exists := shortLinks[id]
 		if exists {
-			// 每次短链被拉取访问时，更新活跃时间戳
 			sl.LastAccessedAt = time.Now()
 			shortLinks[id] = sl
 			saveShortLinks()
@@ -1334,13 +1331,15 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// 启动后台自动清理过期短链的协程
 	startCleanupTask()
 
 	http.HandleFunc("/", requiresAuth(indexHandler))
 	http.HandleFunc("/sub", requiresAuth(subHandler))
 
-	port := "5000"
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "5000"
+	}
 	fmt.Printf("Server is running on http://0.0.0.0:%s\n", port)
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
