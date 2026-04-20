@@ -198,9 +198,17 @@ const HTML_TEMPLATE = `
         .stats-box { background: var(--success-bg); color: var(--success-text); padding: 14px 16px; border-radius: 10px; margin-bottom: 16px; border: 1px solid var(--success-border); font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
         .sub-box { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; align-items: center; background: #f8fafc; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
         .sub-input { flex: 1; min-width: 200px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+        
         .filter-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; margin: 20px 0; overflow: hidden; }
-        .filter-card summary { padding: 14px 18px; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-bottom: 1px solid var(--border); cursor: pointer; font-weight: 600; color: #334155; display: flex; align-items: center; gap: 10px; list-style: none; }
-        .filter-stats-inline { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; font-size: 0.85rem; font-weight: 500; }
+        .filter-card summary { padding: 14px 18px; background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border-bottom: 1px solid var(--border); cursor: pointer; font-weight: 600; color: #334155; display: flex; align-items: center; justify-content: space-between; list-style: none; }
+        .filter-card summary::-webkit-details-marker { display: none; } /* 隐藏原生三角 */
+        
+        /* 交互三角样式与动画 */
+        .summary-left { display: flex; align-items: center; gap: 10px; }
+        .toggle-icon { display: inline-block; width: 0; height: 0; border-top: 7px solid transparent; border-bottom: 7px solid transparent; border-left: 12px solid #64748b; transition: transform 0.1s cubic-bezier(0.4, 0, 0.2, 1); }
+        details[open] > summary .toggle-icon { transform: rotate(90deg); }
+
+        .filter-stats-inline { display: inline-flex; align-items: center; gap: 12px; font-size: 0.85rem; font-weight: 500; }
         .stat-badge { padding: 3px 10px; border-radius: 20px; font-size: 0.8rem; }
         .stat-badge.pass { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
         .stat-badge.fail { background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); }
@@ -243,7 +251,10 @@ const HTML_TEMPLATE = `
         <div class="filter-card">
             <details open>
                 <summary>
-                    <span>📋 节点检测详情</span>
+                    <div class="summary-left">
+                        <i class="toggle-icon"></i>
+                        <span>📋 节点检测详情</span>
+                    </div>
                     <div class="filter-stats-inline">
                         <span class="stat-badge pass">✅ {{ .FilterStats.Alive }} 通过</span>
                         <span class="stat-badge fail">❌ {{ .FilterStats.Dead }} 失败</span>
