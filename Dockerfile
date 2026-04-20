@@ -26,6 +26,8 @@ WORKDIR /app
 # 从构建阶段复制二进制文件
 COPY --from=builder /app/converter .
 
+COPY images ./images
+
 # 预创建核心存储目录
 RUN mkdir -p /app/core
 
