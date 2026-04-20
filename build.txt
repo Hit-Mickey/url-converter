@@ -1,0 +1,7 @@
+docker build -t mickey666/url-converter:VERSION.
+
+docker login
+
+docker tag mickey666/url-converter:VERSION mickey666/url-converter:latest
+docker push mickey666/url-converter:VERSION
+docker push mickey666/url-converter:latest

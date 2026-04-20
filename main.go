@@ -227,8 +227,7 @@ const HTML_TEMPLATE = `
         
         {{ if .FilterStats }}
         <div class="stats-box">
-            <span>🚀</span>
-            <span>拉取 <strong>{{ .FilterStats.Total }}</strong> 个节点，
+            <span><img src="/images/白猫-拉取节点.svg" alt="白猫" style="position: relative; top: -1px;vertical-align: middle; margin-right: 6px; height: 16px;">拉取 <strong>{{ .FilterStats.Total }}</strong> 个节点，
             <span style="color: var(--danger);">{{ .FilterStats.Dead }}</span> 个无法连通被剔除，
             保留 <strong style="color: var(--success);">{{ .FilterStats.Alive }}</strong> 个健康节点</span>
         </div>
@@ -251,7 +250,7 @@ const HTML_TEMPLATE = `
                 <summary>
                     <div class="summary-left">
                         <i class="toggle-icon"></i>
-                        <span>📋 节点检测详情</span>
+                        <span><img src="/images/更多猫宠-节点检测详情.svg" alt="更多猫宠" style="position: relative; top: -1px;vertical-align: middle; margin-right: 5px; height: 16px;">节点检测详情</span>
                     </div>
                     <div class="filter-stats-inline">
                         <span class="stat-badge pass">✅ {{ .FilterStats.Alive }} 通过</span>
@@ -270,39 +269,42 @@ const HTML_TEMPLATE = `
         {{ end }}
         
         <form method="POST" autocomplete="off" id="mainForm">
-            <label for="linksInput">🔗 粘贴混合内容（最大支持解析 {{ .MaxLinks }} 个节点）</label>
+            <label for="linksInput">
+                <img src="/images/布偶猫-粘贴混合内容.svg" alt="布偶猫" style="position: relative; top: -1px;vertical-align: middle; margin-right: 0px; height: 18px;">
+                粘贴混合内容（最大支持解析 {{ .MaxLinks }} 个节点）
+            </label>
             <textarea name="links" id="linksInput" autocomplete="off" placeholder="支持混合输入：&#10;• 多个订阅链接 (http/https)&#10;• 多协议节点链接 (tuic://, vless://, ss:// 等)&#10;• 完整的或部分的 Clash/Mihomo 配置 (YAML)">{{ .Links }}</textarea>
             
             <div class="options-bar">
                 <label title="开启后可生成持久短链订阅">
                     <input type="checkbox" name="hosted" value="1" {{ if .HostedMode }}checked{{ end }}>
-                    托管模式
+                    <img src="/images/柴犬-托管模式.svg" alt="柴犬" style="vertical-align: middle; margin-right: -3px; height: 16px;">托管模式
                 </label>
                 <label title="自动测试节点连通性并剔除无效节点">
                     <input type="checkbox" name="filter" value="1" {{ if .FilterMode }}checked{{ end }}>
-                    剔除无效节点
+                    <img src="/images/金毛-删除无效节点.svg" alt="金毛" style="vertical-align: middle; margin-right: -3px; height: 16px;">剔除无效节点
                 </label>
             </div>
             
             <div class="btn-group">
-                <button type="submit" id="submitBtn">开始转换</button>
+                <button type="submit" id="submitBtn"><img src="/images/橘猫-开始转换.svg" alt="橘猫" style="position: relative; top: -1px;vertical-align: middle; margin-right: 6px; height: 16px;">开始转换</button>
             </div>
         </form>
 
         {{ if .SubUrl }}
-            <label style="color: var(--success-text); margin-top: 16px; display: block;">专属订阅短链接（7天不使用将过期）：</label>
+            <label style="color: var(--success-text); margin-top: 16px; display: block;"><img src="/images/柯基-专属订阅短链接.svg" alt="柯基" style="position: relative; top: -1px;vertical-align: middle; margin-right: 6px; height: 16px;">专属订阅短链接（7天不使用将过期）：</label>
             <div class="sub-box">
                 <input type="text" readonly id="subUrl" class="sub-input" value="{{ .SubUrl }}">
-                <button type="button" onclick="copyText('subUrl', this)" style="margin: 0; min-width: 100px; padding: 10px 16px;">复制</button>
+                <button type="button" onclick="copyText('subUrl', this)" style="margin: 0; min-width: 100px; padding: 10px 16px;"><img src="/images/田园犬-复制.svg" alt="田园犬" style="position: relative; top: -2px;vertical-align: middle; margin-right: 6px; height: 16px;">复制</button>
             </div>
         {{ end }}
 
         {{ if .Result }}
             <div class="result-card">
-                <label>📄 配置预览 (YAML)</label>
+                <label><img src="/images/可达鸭-配置预览.svg" alt="可达鸭" style="position: relative; top: -1px;vertical-align: middle; margin-right: 6px; height: 16px;">配置预览 (YAML)</label>
                 <textarea readonly id="res" autocomplete="off">{{ .Result }}</textarea>
                 <div style="padding: 12px 16px; background: #f8fafc; border-top: 1px solid var(--border);">
-                    <button type="button" onclick="copyText('res', this)" style="min-width: 160px;">复制预览结果</button>
+                    <button type="button" onclick="copyText('res', this)" style="min-width: 160px;"><img src="/images/边牧-复制预览结果.svg" alt="边牧" style="position: relative; top: -1px;vertical-align: middle; margin-right: 6px; height: 16px;">复制预览结果</button>
                 </div>
             </div>
         {{ end }}
@@ -324,7 +326,7 @@ const HTML_TEMPLATE = `
             const submitBtn = document.getElementById('submitBtn');
             form.addEventListener('submit', function(e) {
                 if (submitBtn.disabled) { e.preventDefault(); return; }
-                submitBtn.innerText = '转换中...';
+                submitBtn.innerText = '🚀 转换中...';
                 submitBtn.disabled = true;
             });
         });
@@ -1302,6 +1304,10 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	startCleanupTask()
+
+	// 添加静态文件服务，处理图片等静态资源
+	fs := http.FileServer(http.Dir("images"))
+	http.Handle("/images/", http.StripPrefix("/images/", fs))
 
 	http.HandleFunc("/", requiresAuth(indexHandler))
 	http.HandleFunc("/sub", requiresAuth(subHandler))
