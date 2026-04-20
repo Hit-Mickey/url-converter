@@ -42,7 +42,6 @@ var (
 type ShortLink struct {
 	Data           string    `json:"data"`
 	FilterMode     bool      `json:"filter"`
-	FullConfig     bool      `json:"full"`
 	LastAccessedAt time.Time `json:"last_accessed_at"` // 记录最后使用时间
 }
 
@@ -108,8 +107,8 @@ func cleanupExpiredLinks() {
 	}
 }
 
-func getOrCreateShortLink(data string, filter, full bool) string {
-	h := md5.Sum([]byte(fmt.Sprintf("%s|%v|%v", data, filter, full)))
+func getOrCreateShortLink(data string, filter bool) string {
+	h := md5.Sum([]byte(fmt.Sprintf("%s|%v", data, filter)))
 	id := hex.EncodeToString(h[:])[:8]
 
 	shortLinkMu.Lock()
@@ -118,7 +117,6 @@ func getOrCreateShortLink(data string, filter, full bool) string {
 		shortLinks[id] = ShortLink{
 			Data:           data,
 			FilterMode:     filter,
-			FullConfig:     full,
 			LastAccessedAt: time.Now(),
 		}
 		saveShortLinks()
@@ -284,10 +282,6 @@ const HTML_TEMPLATE = `
                     <input type="checkbox" name="filter" value="1" {{ if .FilterMode }}checked{{ end }}>
                     剔除无效节点
                 </label>
-                <label title="生成完整的包含路由和策略组的配置文件">
-                    <input type="checkbox" name="full" value="1" {{ if .FullConfig }}checked{{ end }}>
-                    生成完整配置
-                </label>
             </div>
             
             <div class="btn-group">
@@ -362,7 +356,6 @@ type TemplateData struct {
 	Links         string
 	HostedMode    bool
 	FilterMode    bool
-	FullConfig    bool
 	SubUrl        string
 	Result        string
 }
@@ -1172,38 +1165,8 @@ func extractProxiesFromInput(inputText string, filterMode bool) ([]map[string]in
 	return allProxies, allErrs, stats, filterResults
 }
 
-func buildOutput(proxies []map[string]interface{}, fullConfig bool) []byte {
-	if !fullConfig {
-		b, _ := yaml.Marshal(map[string]interface{}{"proxies": proxies})
-		return b
-	}
-
-	var proxyNames []string
-	for _, p := range proxies {
-		if name, ok := p["name"].(string); ok {
-			proxyNames = append(proxyNames, name)
-		}
-	}
-
-	config := map[string]interface{}{
-		"port":       7890,
-		"socks-port": 7891,
-		"allow-lan":  true,
-		"mode":       "rule",
-		"log-level":  "info",
-		"proxies":    proxies,
-		"proxy-groups": []map[string]interface{}{
-			{
-				"name":    "PROXIES",
-				"type":    "select",
-				"proxies": append([]string{"DIRECT"}, proxyNames...),
-			},
-		},
-		"rules": []string{
-			"MATCH,PROXIES",
-		},
-	}
-	b, _ := yaml.Marshal(config)
+func buildOutput(proxies []map[string]interface{}) []byte {
+	b, _ := yaml.Marshal(map[string]interface{}{"proxies": proxies})
 	return b
 }
 
@@ -1227,7 +1190,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		data.HostedMode = r.FormValue("hosted") == "1"
 		data.FilterMode = r.FormValue("filter") == "1"
-		data.FullConfig = r.FormValue("full") == "1"
 		linksText := r.FormValue("links")
 		data.Links = linksText
 
@@ -1250,7 +1212,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(proxies) > 0 {
-			yamlBytes := buildOutput(proxies, data.FullConfig)
+			yamlBytes := buildOutput(proxies)
 			data.Result = string(yamlBytes)
 
 			if data.HostedMode {
@@ -1272,7 +1234,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				baseUrl += host + "/sub"
 
-				id := getOrCreateShortLink(b64Data, data.FilterMode, data.FullConfig)
+				id := getOrCreateShortLink(b64Data, data.FilterMode)
 				data.SubUrl = fmt.Sprintf("%s?id=%s", baseUrl, id)
 			}
 		}
@@ -1286,7 +1248,7 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var filterMode, fullConfig bool
+	var filterMode bool
 	var encodedData string
 
 	id := r.URL.Query().Get("id")
@@ -1306,11 +1268,9 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		encodedData = sl.Data
 		filterMode = sl.FilterMode
-		fullConfig = sl.FullConfig
 	} else {
 		encodedData = r.URL.Query().Get("data")
 		filterMode = r.URL.Query().Get("filter") == "1"
-		fullConfig = r.URL.Query().Get("full") == "1"
 	}
 
 	if encodedData == "" {
@@ -1332,7 +1292,7 @@ func subHandler(w http.ResponseWriter, r *http.Request) {
 
 	proxies, _, _, _ := extractProxiesFromInput(inputText, filterMode)
 	if len(proxies) > 0 {
-		yamlBytes := buildOutput(proxies, fullConfig)
+		yamlBytes := buildOutput(proxies)
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		w.Write(yamlBytes)
 	} else {
